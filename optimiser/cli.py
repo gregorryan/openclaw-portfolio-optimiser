@@ -3,7 +3,7 @@
 Two modes:
 
 1. Optimisation (default)   — fit weights to the full history.
-2. Backtest (--backtest)    — fit weights to the first N% of history,
+2. Backtest (--backtest)    — fit weights on the first 80% of history,
                               then evaluate them on the held-out tail.
 
 Two input styles for either mode:
@@ -12,15 +12,13 @@ Two input styles for either mode:
 - Natural language  — --from-text "max sharpe, exclude banks, cap 10%"
 
 Output is always JSON: stdout on success (exit 0), stderr on error
-(exit 1). Every successful run includes a fresh `run_id` (UUID) and
-ISO-8601 `timestamp` so the agent layer has evidence the CLI actually
-ran in the current turn — chat-history caching is structurally
-detectable.
+(exit 1). Every successful run includes:
 
-Examples:
-    python -m optimiser.cli optimise --objective max_sharpe
-    python -m optimiser.cli optimise --from-text "min variance, no banks"
-    python -m optimiser.cli optimise --from-text "max sharpe, cap 15%" --backtest
+- a fresh `run_id` (UUID) and ISO-8601 `timestamp` so the agent layer
+  has evidence the CLI actually ran in the current turn — chat-history
+  caching is structurally detectable
+- a `chart_path` pointing at a PNG bar chart of the weights, ready to
+  be attached to a Telegram reply
 """
 
 from __future__ import annotations
@@ -32,6 +30,7 @@ import uuid
 from datetime import datetime, timezone
 
 from optimiser.backtest import backtest
+from optimiser.chart import render_weights_chart
 from optimiser.constraints import Constraints, InfeasibleConstraints
 from optimiser.data import DEFAULT_UNIVERSE_FTSE, DataError, load
 from optimiser.fitness import Objective
@@ -46,16 +45,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    opt = sub.add_parser(
-        "optimise",
-        help="Run the GA on a universe of tickers",
-    )
-    opt.add_argument(
-        "--from-text",
-        type=str,
-        default=None,
-        help='Free-text request, e.g. "max sharpe, exclude banks, cap 10%%"',
-    )
+    opt = sub.add_parser("optimise", help="Run the GA on a universe of tickers")
+    opt.add_argument("--from-text", type=str, default=None)
     opt.add_argument("--tickers", nargs="+", default=None)
     opt.add_argument(
         "--objective",
@@ -68,16 +59,12 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--seed", type=int, default=None)
     opt.add_argument("--population", type=int, default=100)
     opt.add_argument("--generations", type=int, default=200)
+    opt.add_argument("--backtest", action="store_true")
+    opt.add_argument("--train-fraction", type=float, default=0.80)
     opt.add_argument(
-        "--backtest",
+        "--no-chart",
         action="store_true",
-        help="Train/test split: fit on first --train-fraction, evaluate on rest",
-    )
-    opt.add_argument(
-        "--train-fraction",
-        type=float,
-        default=0.80,
-        help="Fraction of history used for fitting in backtest mode (default 0.80)",
+        help="Skip PNG chart rendering (default: chart is generated)",
     )
 
     return parser
@@ -143,6 +130,36 @@ def _stats_to_dict(stats) -> dict:
     }
 
 
+def _maybe_render_chart(
+    weights: dict[str, float],
+    objective: str,
+    excluded: list[str],
+    cap: float,
+    seed: int | None,
+    run_id: str,
+    mode: str,
+    disabled: bool,
+) -> str | None:
+    """Render a PNG chart of weights if not disabled; return path or None."""
+    if disabled:
+        return None
+    cap_str = f"{cap * 100:.0f}% cap" if cap < 1.0 else "no cap"
+    seed_str = f"seed {seed}" if seed is not None else "random seed"
+    ex_str = f" | excluding {', '.join(excluded)}" if excluded else ""
+    subtitle = f"{objective.replace('_', ' ')} | {cap_str} | {seed_str}{ex_str}"
+    title = "Portfolio weights" if mode == "optimise" else "Portfolio weights (in-sample fit)"
+    try:
+        return render_weights_chart(
+            weights=weights,
+            title=title,
+            subtitle=subtitle,
+            run_id=run_id,
+        )
+    except Exception:
+        # Chart failure must never break the optimisation itself.
+        return None
+
+
 def _cmd_optimise(args: argparse.Namespace) -> int:
     try:
         parse_info: dict | None = None
@@ -171,6 +188,9 @@ def _cmd_optimise(args: argparse.Namespace) -> int:
             n_generations=args.generations,
         )
 
+        run_id = _run_id()
+        timestamp = _timestamp()
+
         if args.backtest:
             bt = backtest(
                 price_data.returns,
@@ -179,17 +199,29 @@ def _cmd_optimise(args: argparse.Namespace) -> int:
                 config=config,
                 train_fraction=args.train_fraction,
             )
+            weights_dict = {
+                t: round(float(w), 4) for t, w in zip(bt.tickers, bt.weights)
+            }
+            chart_path = _maybe_render_chart(
+                weights=weights_dict,
+                objective=args.objective,
+                excluded=list(args.excluded),
+                cap=args.max_weight,
+                seed=args.seed,
+                run_id=run_id,
+                mode="backtest",
+                disabled=args.no_chart,
+            )
             output: dict = {
                 "ok": True,
                 "mode": "backtest",
-                "run_id": _run_id(),
-                "timestamp": _timestamp(),
+                "run_id": run_id,
+                "timestamp": timestamp,
+                "chart_path": chart_path,
                 "objective": args.objective,
                 "tickers": list(bt.tickers),
                 "excluded_tickers": list(args.excluded),
-                "weights": {
-                    t: round(float(w), 4) for t, w in zip(bt.tickers, bt.weights)
-                },
+                "weights": weights_dict,
                 "train_stats": _stats_to_dict(bt.train_stats),
                 "test_stats": _stats_to_dict(bt.test_stats),
                 "split": {
@@ -210,17 +242,29 @@ def _cmd_optimise(args: argparse.Namespace) -> int:
                 constraints=constraints,
                 config=config,
             )
+            weights_dict = {
+                t: round(float(w), 4) for t, w in result.as_dict().items()
+            }
+            chart_path = _maybe_render_chart(
+                weights=weights_dict,
+                objective=args.objective,
+                excluded=list(args.excluded),
+                cap=args.max_weight,
+                seed=args.seed,
+                run_id=run_id,
+                mode="optimise",
+                disabled=args.no_chart,
+            )
             output = {
                 "ok": True,
                 "mode": "optimise",
-                "run_id": _run_id(),
-                "timestamp": _timestamp(),
+                "run_id": run_id,
+                "timestamp": timestamp,
+                "chart_path": chart_path,
                 "objective": args.objective,
                 "tickers": list(result.tickers),
                 "excluded_tickers": list(args.excluded),
-                "weights": {
-                    t: round(float(w), 4) for t, w in result.as_dict().items()
-                },
+                "weights": weights_dict,
                 "stats": _stats_to_dict(result.stats),
                 "summary": {
                     "n_holdings": int(sum(1 for w in result.weights if w > 1e-6)),
