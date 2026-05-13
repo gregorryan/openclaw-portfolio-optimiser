@@ -1,19 +1,19 @@
 ---
 name: portfolio-optimise
-description: "Run a genetic algorithm to find optimal portfolio weights given a universe of tickers, an objective (max Sharpe, min variance, max return), and optional constraints (per-name cap, excluded tickers, minimum holdings). Optional train/test backtest mode reports both in-sample and out-of-sample performance. Renders a chart of weights as a PNG and sends it inline to Telegram."
+description: "Run a genetic algorithm to find optimal portfolio weights given a universe of tickers, an objective (max Sharpe, min variance, max return), and optional constraints (per-name cap, excluded tickers, minimum holdings). Optional train/test backtest mode reports both in-sample and out-of-sample performance. A chart of the weights is delivered to Telegram as a side effect of the wrapper."
 metadata:
   {
     "openclaw":
       {
         "emoji": "📐",
-        "requires": { "bins": ["python3", "openclaw"] },
+        "requires": { "bins": ["bash"] },
       },
   }
 ---
 
 # Portfolio Optimise Skill
 
-Find optimal portfolio weights using a genetic algorithm against 5 years of daily-close adjusted prices from Yahoo Finance. Optionally, hold out part of that history and report how the weights performed out-of-sample. Always send a chart of the weights inline.
+Find optimal portfolio weights using a genetic algorithm against 5 years of daily-close adjusted prices from Yahoo Finance. Optionally hold out part of that history and report how the weights performed out-of-sample. A PNG chart of the weights is delivered to Telegram automatically.
 
 ## Critical: freshness verification
 
@@ -57,23 +57,27 @@ LLOY.L, BARC.L, HSBA.L, NWG.L, AZN.L, GSK.L, ULVR.L, DGE.L, RKT.L, BATS.L, IMB.L
 
 ## How to invoke
 
+**Always call the wrapper script.** Do NOT call `python -m optimiser.cli` directly — the wrapper handles venv activation, JSON capture, and inline Telegram chart delivery in one atomic step.
+
 **Optimisation mode (default):**
 
 ```bash
-cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
-  python -m optimiser.cli optimise --from-text "<user's request>" --seed 42
+/Users/gregorryan/code/openclaw-portfolio-optimiser/scripts/sharpe-optimise.sh --from-text "<user's request>" --seed 42
 ```
 
 **Backtest mode:**
 
 ```bash
-cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
-  python -m optimiser.cli optimise --from-text "<user's request>" --backtest --seed 42
+/Users/gregorryan/code/openclaw-portfolio-optimiser/scripts/sharpe-optimise.sh --from-text "<user's request>" --backtest --seed 42
 ```
 
 Backtest mode fits weights on the first 80% of the returns window and evaluates them on the held-out 20%. Use `--train-fraction 0.70` (or other) to adjust the split.
 
 Always include `--seed 42` if the user has not specified a seed.
+
+**The wrapper has two outputs:**
+1. JSON to stdout — exactly what you'd get from the bare Python CLI; parse it as before.
+2. A Telegram message with the chart PNG attached, delivered automatically to the user's chat. You do NOT need to send the chart yourself; that's handled by the wrapper. You only need to produce the text reply with the stats, weights, and interpretation.
 
 ## Output schema — optimise mode (default)
 
@@ -124,22 +128,6 @@ Always include `--seed 42` if the user has not specified a seed.
   }
 }
 ```
-
-## Sending the chart inline (REQUIRED)
-
-After every successful optimise or backtest run, you MUST also send the chart PNG inline to the user's Telegram. The chart file is the path under `chart_path` in the JSON output.
-
-The exact command to run is:
-
-```bash
-openclaw message send --channel telegram --target 8860847516 --message "Portfolio weights chart" --media <chart_path>
-```
-
-Where `<chart_path>` is the value from the JSON. Run this command in the same turn as the optimise/backtest invocation, after you have the path.
-
-**The text reply (with run_id, timestamp, stats, weights, interpretation) is sent as your normal reply. The chart is sent as a separate message via the `openclaw message send` command. Both should arrive in the same turn.**
-
-If the `openclaw message send` command fails, mention this briefly in your text reply so the user knows the chart is missing — do not stay silent about the failure.
 
 ## Reply format — optimise mode
 
@@ -196,7 +184,7 @@ If the gap is negative or small, frame it as the test window happening to be unu
 3. **Never quote a number that is not in the JSON `weights`, `stats`, `train_stats`, or `test_stats`** of the run you just quoted.
 4. **If the user repeats a previous question, re-run the CLI.** Do not paraphrase a previous answer.
 5. **If the user asks "how would this have done?"** or otherwise asks about historical performance, **use `--backtest`** rather than the default mode. The backtest is the honest answer; in-sample stats are not.
-6. **After every successful run, send the chart inline via `openclaw message send --media <chart_path>`.** Don't skip this.
-7. **If the skill returns `ok: false`, report the error verbatim** with the new `run_id` and `timestamp`.
+6. **You do not need to send the chart yourself.** The wrapper handles inline Telegram chart delivery. Just produce the text reply.
+7. **If the wrapper returns `ok: false`, report the error verbatim** with the new `run_id` and `timestamp`.
 8. **No buy/sell recommendations on individual tickers.**
 9. **Always end with the illustrative-only reminder.**
