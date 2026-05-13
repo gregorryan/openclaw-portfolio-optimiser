@@ -5,21 +5,10 @@ Turns free-text portfolio requests into a typed object the CLI can consume.
 Design choices:
 - Pure-Python regex matching; no LLM dependency. Tests run in milliseconds
   and parsing is deterministic.
-- "Soft" sector resolution via a small FTSE map. Adding more universes
-  means adding more sector→tickers entries.
-- Tolerant of casing and word order. We extract whatever the user said,
-  leave the rest at defaults.
+- Sector resolution uses optimiser.data.SECTORS — single source of truth
+  so a universe change is automatically reflected here.
 - Returns a confidence score so the agent layer can decide whether to
   trust the parsed result or fall back to LLM interpretation.
-
-Examples:
-    >>> parse_request("max sharpe, exclude banks, cap 10% per name")
-    StructuredRequest(
-        objective=Objective.MAX_SHARPE,
-        max_weight=0.10,
-        excluded_tickers=("LLOY.L", "BARC.L", "HSBA.L"),
-        ...
-    )
 """
 
 from __future__ import annotations
@@ -27,22 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from optimiser.data import SECTORS
 from optimiser.fitness import Objective
-
-
-# Sector map for the bundled FTSE universe.
-FTSE_SECTORS: dict[str, tuple[str, ...]] = {
-    "banks": ("LLOY.L", "BARC.L", "HSBA.L"),
-    "pharma": ("AZN.L", "GSK.L"),
-    "pharmaceuticals": ("AZN.L", "GSK.L"),
-    "consumer staples": ("ULVR.L", "DGE.L"),
-    "consumer": ("ULVR.L", "DGE.L"),
-    "energy": ("SHEL.L", "BP.L"),
-    "oil": ("SHEL.L", "BP.L"),
-    "miners": ("RIO.L",),
-    "mining": ("RIO.L",),
-    "materials": ("RIO.L",),
-}
 
 
 OBJECTIVE_PATTERNS: list[tuple[re.Pattern[str], Objective]] = [
@@ -59,7 +34,6 @@ OBJECTIVE_PATTERNS: list[tuple[re.Pattern[str], Objective]] = [
     (re.compile(r"\baggressive\b", re.I), Objective.MAX_RETURN),
 ]
 
-
 CAP_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bmax(?:imum)?\s+(\d+(?:\.\d+)?)\s*%", re.I),
     re.compile(r"\bcap(?:ped)?\s+(?:at\s+)?(\d+(?:\.\d+)?)\s*%", re.I),
@@ -68,18 +42,15 @@ CAP_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bmax\s+weight\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*%", re.I),
 ]
 
-
 MIN_HOLDINGS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bat\s+least\s+(\d+)\s+(?:holdings?|names?|positions?|stocks?)", re.I),
     re.compile(r"\bmin(?:imum)?\s+(\d+)\s+(?:holdings?|names?|positions?|stocks?)", re.I),
     re.compile(r"\b(\d+)\+\s+(?:holdings?|names?|positions?|stocks?)", re.I),
 ]
 
-
 # Strict ticker pattern: prefer `.L` matches; require at least 2 letters.
-# Order matters in alternation — `.L` first so it wins where applicable.
-TICKER_PATTERN = re.compile(r"\b([A-Z]{1,5}\.L|[A-Z]{2,5})\b")
-
+# Hyphens and dots inside (e.g. BT-A.L) are matched explicitly.
+TICKER_PATTERN = re.compile(r"\b([A-Z]{1,5}(?:-[A-Z])?\.L|[A-Z]{2,5})\b")
 
 TICKER_BLOCKLIST: set[str] = {
     "FTSE", "GA", "AI", "ML", "USD", "GBP", "EUR", "EU", "UK", "US",
@@ -87,12 +58,6 @@ TICKER_BLOCKLIST: set[str] = {
     "CFO", "ESG", "VIX", "GDP", "CPI", "PMI", "PE", "EPS",
 }
 
-
-# Exclusion phrase: capture text after a trigger word up to the next
-# clause boundary. We deliberately allow "and" and "or" inside the phrase
-# so multi-ticker lists like "exclude SHEL.L and BP.L" survive intact.
-# Clause terminators: comma, semicolon, end of string, or specific
-# next-clause keywords (cap, max, min, at least, with, but).
 EXCLUSION_TRIGGERS = re.compile(
     r"\b(?:exclude|excluding|no|without|drop|skip|remove)\s+"
     r"(.+?)"
@@ -147,7 +112,6 @@ def _extract_min_holdings(text: str) -> int | None:
 
 
 def _extract_tickers(text: str) -> tuple[str, ...]:
-    """Find ticker-like tokens in the original text, drop common false positives."""
     matches = TICKER_PATTERN.findall(text)
     seen: list[str] = []
     for t in matches:
@@ -160,25 +124,20 @@ def _extract_tickers(text: str) -> tuple[str, ...]:
 
 def _resolve_sector_to_tickers(phrase: str) -> tuple[str, ...]:
     lowered = phrase.strip().lower()
-    # Try the longest matching sector key in the phrase, not just the
-    # whole phrase. Handles "consumer staples" inside "no consumer staples".
-    sorted_keys = sorted(FTSE_SECTORS.keys(), key=len, reverse=True)
+    sorted_keys = sorted(SECTORS.keys(), key=len, reverse=True)
     for key in sorted_keys:
         if key in lowered:
-            return FTSE_SECTORS[key]
+            return SECTORS[key]
     return ()
 
 
 def _extract_exclusions(text: str) -> tuple[tuple[str, ...], list[str]]:
-    """Pull explicit tickers and resolved sectors from exclusion phrases."""
     notes: list[str] = []
     excluded: list[str] = []
 
     for match in EXCLUSION_TRIGGERS.finditer(text):
         phrase = match.group(1).strip()
 
-        # Sector resolution first — looks for known sector keywords in the
-        # phrase. If found, use the mapped tickers and stop.
         sector_tickers = _resolve_sector_to_tickers(phrase)
         if sector_tickers:
             for t in sector_tickers:
@@ -187,8 +146,6 @@ def _extract_exclusions(text: str) -> tuple[tuple[str, ...], list[str]]:
             notes.append(f"resolved '{phrase}' as sector → {list(sector_tickers)}")
             continue
 
-        # Otherwise, look for ticker tokens within the phrase. Search the
-        # phrase as-is so `.L` suffixes are preserved.
         ticker_tokens = _extract_tickers(phrase)
         if ticker_tokens:
             for t in ticker_tokens:
@@ -201,15 +158,7 @@ def _extract_exclusions(text: str) -> tuple[tuple[str, ...], list[str]]:
 
 
 def parse_request(text: str) -> StructuredRequest:
-    """Parse a free-text portfolio request into structured fields.
-
-    Args:
-        text: natural-language request, e.g. "max sharpe, exclude banks, cap 10%".
-
-    Returns:
-        StructuredRequest with whichever fields were extractable. Fields the
-        parser couldn't find are left as None / empty tuples.
-    """
+    """Parse a free-text portfolio request into structured fields."""
     if not text or not text.strip():
         return StructuredRequest(confidence=0.0, notes=("empty input",))
 
@@ -224,9 +173,6 @@ def parse_request(text: str) -> StructuredRequest:
     excluded, exc_notes = _extract_exclusions(text)
     notes.extend(exc_notes)
 
-    # Universe = tickers mentioned in the text, *minus* anything in the
-    # exclusion list. We pull all tickers first then subtract — handles
-    # cases like "with LLOY.L BARC.L, exclude BARC.L".
     all_tickers = _extract_tickers(text)
     excluded_set = set(excluded)
     tickers = tuple(t for t in all_tickers if t not in excluded_set)

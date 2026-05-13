@@ -23,21 +23,79 @@ import pandas as pd
 import yfinance as yf
 
 
-# A small UK-equities universe used in tests and for the default
-# demo if the user does not specify their own. FTSE 100 constituents
-# spanning banks, pharma, energy, consumer staples, and miners.
+# Curated FTSE 100 sample spanning 10 sectors. 30 names is large enough
+# that "FTSE" means something credible to a quant while keeping a GA run
+# under ~15 seconds on a modest population.
 DEFAULT_UNIVERSE_FTSE: tuple[str, ...] = (
+    # Banks
     "LLOY.L",   # Lloyds Banking Group
     "BARC.L",   # Barclays
     "HSBA.L",   # HSBC
+    "NWG.L",    # NatWest
+    # Pharma
     "AZN.L",    # AstraZeneca
     "GSK.L",    # GSK
+    # Consumer staples
     "ULVR.L",   # Unilever
     "DGE.L",    # Diageo
+    "RKT.L",    # Reckitt Benckiser
+    # Tobacco
+    "BATS.L",   # British American Tobacco
+    "IMB.L",    # Imperial Brands
+    # Retail
+    "TSCO.L",   # Tesco
+    "SBRY.L",   # Sainsbury's
+    "NXT.L",    # Next
+    # Energy
     "SHEL.L",   # Shell
     "BP.L",     # BP
+    # Mining
     "RIO.L",    # Rio Tinto
+    "GLEN.L",   # Glencore
+    "AAL.L",    # Anglo American
+    # Telecoms
+    "VOD.L",    # Vodafone
+    "BT-A.L",   # BT Group
+    # Utilities
+    "SSE.L",    # SSE
+    "NG.L",     # National Grid
+    "SVT.L",    # Severn Trent
+    # Insurance
+    "AV.L",     # Aviva
+    "LGEN.L",   # Legal & General
+    "PRU.L",    # Prudential
+    # Real estate
+    "LAND.L",   # Land Securities
+    # Industrials
+    "BA.L",     # BAE Systems
+    "RR.L",     # Rolls-Royce
 )
+
+# Sector groupings — used by the parser to resolve "exclude banks" etc.
+# Source of truth: kept here so the parser doesn't drift from the universe.
+SECTORS: dict[str, tuple[str, ...]] = {
+    "banks": ("LLOY.L", "BARC.L", "HSBA.L", "NWG.L"),
+    "pharma": ("AZN.L", "GSK.L"),
+    "pharmaceuticals": ("AZN.L", "GSK.L"),
+    "consumer staples": ("ULVR.L", "DGE.L", "RKT.L"),
+    "consumer": ("ULVR.L", "DGE.L", "RKT.L"),
+    "tobacco": ("BATS.L", "IMB.L"),
+    "retail": ("TSCO.L", "SBRY.L", "NXT.L"),
+    "supermarkets": ("TSCO.L", "SBRY.L"),
+    "energy": ("SHEL.L", "BP.L"),
+    "oil": ("SHEL.L", "BP.L"),
+    "mining": ("RIO.L", "GLEN.L", "AAL.L"),
+    "miners": ("RIO.L", "GLEN.L", "AAL.L"),
+    "materials": ("RIO.L", "GLEN.L", "AAL.L"),
+    "telecoms": ("VOD.L", "BT-A.L"),
+    "telecom": ("VOD.L", "BT-A.L"),
+    "utilities": ("SSE.L", "NG.L", "SVT.L"),
+    "insurance": ("AV.L", "LGEN.L", "PRU.L"),
+    "real estate": ("LAND.L",),
+    "reits": ("LAND.L",),
+    "industrials": ("BA.L", "RR.L"),
+    "defence": ("BA.L",),
+}
 
 DEFAULT_LOOKBACK_YEARS: int = 5
 
@@ -89,7 +147,6 @@ def fetch_prices(
         start = start or default_start
         end = end or default_end
 
-    # auto_adjust=True returns adjusted prices in the 'Close' column.
     raw = yf.download(
         tickers=list(tickers),
         start=start,
@@ -103,12 +160,9 @@ def fetch_prices(
     if raw is None or raw.empty:
         raise DataError(f"yfinance returned no data for {list(tickers)} between {start} and {end}")
 
-    # yfinance returns different shapes depending on ticker count.
-    # Normalise to a flat DataFrame: rows=date, cols=ticker, values=adj close.
     if len(tickers) == 1:
         prices = raw[["Close"]].rename(columns={"Close": tickers[0]})
     else:
-        # MultiIndex columns: (ticker, field). Pull the Close field per ticker.
         prices = pd.DataFrame({t: raw[t]["Close"] for t in tickers if t in raw.columns.get_level_values(0)})
 
     prices = prices.dropna(how="any")
@@ -152,7 +206,7 @@ def load(
 ) -> PriceData:
     """Convenience: fetch prices and compute returns in one call.
 
-    Defaults to the FTSE universe over a 5-year window with log returns.
+    Defaults to the FTSE 30-name universe over a 5-year window with log returns.
     This is the function the GA skill will call in production.
     """
     if tickers is None:

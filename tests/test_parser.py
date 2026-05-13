@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
+from optimiser.data import SECTORS
 from optimiser.fitness import Objective
 from optimiser.parser import (
-    FTSE_SECTORS,
     StructuredRequest,
     parse_request,
 )
@@ -69,13 +69,11 @@ def test_max_weight_phrases(phrase, expected):
 
 
 def test_max_weight_already_decimal_not_doubled():
-    """If user writes '0.10' (no %), they mean 10%, but our patterns require %."""
     result = parse_request("max sharpe, max 10%")
     assert result.max_weight == 0.10
 
 
 def test_max_weight_above_100_pct_clamps():
-    """Anything over 100% is clamped to 1.0 — defensive guard."""
     result = parse_request("max sharpe, max 200%")
     assert result.max_weight == 1.0
 
@@ -112,14 +110,12 @@ def test_picks_up_us_style_tickers():
 
 
 def test_blocklist_excludes_common_acronyms():
-    """FTSE, US, UK, etc. look like tickers but aren't."""
     result = parse_request("max sharpe on FTSE 100, in the UK")
     assert "FTSE" not in result.tickers
     assert "UK" not in result.tickers
 
 
 def test_universe_minus_exclusions():
-    """If a user lists tickers then excludes some, universe = list - excluded."""
     result = parse_request(
         "max sharpe with LLOY.L BARC.L AZN.L, exclude BARC.L"
     )
@@ -132,13 +128,13 @@ def test_universe_minus_exclusions():
 # ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("phrase,expected_excluded", [
-    ("exclude banks", FTSE_SECTORS["banks"]),
-    ("no banks", FTSE_SECTORS["banks"]),
-    ("without banks", FTSE_SECTORS["banks"]),
-    ("exclude pharma", FTSE_SECTORS["pharma"]),
-    ("no oil", FTSE_SECTORS["oil"]),
-    ("drop energy", FTSE_SECTORS["energy"]),
-    ("skip miners", FTSE_SECTORS["miners"]),
+    ("exclude banks", SECTORS["banks"]),
+    ("no banks", SECTORS["banks"]),
+    ("without banks", SECTORS["banks"]),
+    ("exclude pharma", SECTORS["pharma"]),
+    ("no oil", SECTORS["oil"]),
+    ("drop energy", SECTORS["energy"]),
+    ("skip miners", SECTORS["miners"]),
 ])
 def test_sector_exclusions(phrase, expected_excluded):
     result = parse_request(f"max sharpe, {phrase}")
@@ -151,7 +147,6 @@ def test_ticker_exclusion_single():
 
 
 def test_ticker_exclusion_with_and():
-    """The 'and' between excluded tickers must NOT terminate the phrase."""
     result = parse_request(
         "max sharpe, exclude SHEL.L and BP.L, cap 25%"
     )
@@ -159,11 +154,10 @@ def test_ticker_exclusion_with_and():
 
 
 def test_multiple_separate_exclusion_clauses():
-    """Two distinct exclusion triggers in one request both apply."""
     result = parse_request(
         "max sharpe, exclude banks; no oil"
     )
-    expected = set(FTSE_SECTORS["banks"]) | set(FTSE_SECTORS["oil"])
+    expected = set(SECTORS["banks"]) | set(SECTORS["oil"])
     assert set(result.excluded_tickers) == expected
 
 
@@ -178,7 +172,6 @@ def test_exclude_unknown_sector_records_note():
 # ---------------------------------------------------------------------
 
 def test_confidence_high_when_all_fields_extracted():
-    """Objective + cap + min-holdings + tickers/excluded = 1.0 confidence."""
     result = parse_request(
         "max sharpe, exclude banks, cap 10%, at least 5 holdings"
     )
@@ -196,7 +189,6 @@ def test_confidence_zero_for_whitespace_only():
 
 
 def test_confidence_partial_when_only_some_fields_present():
-    """Only objective present out of 4 → 0.25."""
     result = parse_request("max sharpe")
     assert result.confidence == 0.25
 
@@ -209,14 +201,14 @@ def test_realistic_query_1():
     r = parse_request("max sharpe, exclude banks, cap 10% per name")
     assert r.objective is Objective.MAX_SHARPE
     assert r.max_weight == 0.10
-    assert set(r.excluded_tickers) == set(FTSE_SECTORS["banks"])
+    assert set(r.excluded_tickers) == set(SECTORS["banks"])
 
 
 def test_realistic_query_2():
     r = parse_request("defensive FTSE portfolio without pharma, at least 8 names")
     assert r.objective is Objective.MIN_VARIANCE
     assert r.min_holdings == 8
-    assert set(r.excluded_tickers) == set(FTSE_SECTORS["pharma"])
+    assert set(r.excluded_tickers) == set(SECTORS["pharma"])
 
 
 def test_realistic_query_3():
