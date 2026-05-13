@@ -1,0 +1,36 @@
+# Pre-commit hooks for the openclaw-portfolio-optimiser repository.
+#
+# Hooks run automatically on every `git commit` and block the commit
+# if they find secrets, large binaries, syntax errors, etc.
+#
+# Run manually against the whole repo:
+#   pre-commit run --all-files
+#
+# Install hooks (one-time setup after cloning):
+#   pre-commit install
+
+repos:
+  # detect-secrets — primary defence against committing tokens, API keys,
+  # and other credentials. Uses a baseline file (.secrets.baseline) to
+  # whitelist known-safe matches; new matches block the commit.
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: '\.lock$|\.env\.example$'
+
+  # Standard hygiene hooks. None of these scan for secrets, but they
+  # catch common mistakes: trailing whitespace, missing newlines at end
+  # of file, accidentally committing private keys, large binaries,
+  # broken YAML/JSON.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: detect-private-key
