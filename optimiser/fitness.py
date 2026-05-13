@@ -98,7 +98,9 @@ def portfolio_stats(
     annual_return = mean_daily * TRADING_DAYS_PER_YEAR
     annual_vol = std_daily * np.sqrt(TRADING_DAYS_PER_YEAR)
 
-    if annual_vol == 0.0:
+    # Guard against degenerate near-zero vol (floating-point noise on
+    # constant series) producing astronomical Sharpe values.
+    if annual_vol < 1e-10:
         sharpe = 0.0
     else:
         sharpe = (annual_return - risk_free_rate) / annual_vol
