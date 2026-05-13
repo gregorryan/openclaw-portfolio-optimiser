@@ -4,6 +4,8 @@ An AI agent you can talk to on Telegram to construct optimal portfolios. Tell it
 
 Submission for the [DataVita OpenClaw Challenge 2026](https://jobs.datavita.co.uk/openclaw-challenge).
 
+[![CI](https://github.com/gregorryan/openclaw-portfolio-optimiser/actions/workflows/ci.yml/badge.svg)](https://github.com/gregorryan/openclaw-portfolio-optimiser/actions/workflows/ci.yml)
+
 ## The problem
 
 Portfolio optimisation is a textbook discipline with serious practical friction. The maths is well-understood — Markowitz, Black-Litterman, risk-parity, all decades old — but the tooling is either Excel sheets that don't compose, expensive licensed software, or Python notebooks that nobody outside quant teams can use.
