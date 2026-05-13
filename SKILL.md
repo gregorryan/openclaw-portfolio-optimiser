@@ -36,53 +36,53 @@ Find optimal portfolio weights using a genetic algorithm against 5 years of dail
 - Trade execution — there is no brokerage integration
 - Backtesting a strategy — this skill only fits weights, it does not simulate
 
+## The universe
+
+The skill operates on a **fixed 30-name FTSE 100 sample**, defined in `optimiser/data.py` as `DEFAULT_UNIVERSE_FTSE`. The names are:
+
+LLOY.L, BARC.L, HSBA.L, NWG.L, AZN.L, GSK.L, ULVR.L, DGE.L, RKT.L, BATS.L, IMB.L, TSCO.L, SBRY.L, NXT.L, SHEL.L, BP.L, RIO.L, GLEN.L, AAL.L, VOD.L, BT-A.L, SSE.L, NG.L, SVT.L, AV.L, LGEN.L, PRU.L, LAND.L, BA.L, RR.L
+
+**Anything outside this list does not exist for this skill.** If the user says "FTSE 100" they get the 30 names above, not the full index. If they want a different universe they must list it explicitly via `--tickers`.
+
+**Do not mention or assign weights to any ticker that is not in this list, unless the user explicitly provided different tickers via `--tickers`.** This rule is mechanical: if a ticker name appears in your output that is not in the JSON `tickers` array returned by the skill, you have hallucinated and must rerun.
+
 ## How to Invoke
 
-The skill is a Python CLI. The project lives at `/Users/gregorryan/code/openclaw-portfolio-optimiser` with a virtualenv at `.venv`. Always:
-
-1. `cd` into the project directory
-2. Activate the venv: `source .venv/bin/activate`
-3. Run `python -m optimiser.cli optimise [flags]`
-
-The CLI prints a single JSON object to stdout. Parse it, then summarise it for the user in plain English. Do not paste the raw JSON back — Telegram users want a readable answer.
-
-## Natural-language mode (preferred for chat)
-
-When the user has stated the request in plain English, pass the entire request via `--from-text` rather than translating it into flags yourself. The CLI's deterministic parser handles objective phrasing, caps, exclusions (by sector or ticker), and min-holdings.
-
-```bash
-cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
-  python -m optimiser.cli optimise --from-text "max sharpe, exclude banks, cap 25% per name" --seed 42
-```
-
-The response will include a `parsed` block showing the input text, parser confidence, and any notes about how the request was interpreted. If `confidence` is below 0.5 or the parser couldn't extract an objective, ask the user to clarify rather than guessing.
-
-You can mix modes: `--from-text "..."` plus explicit overriding flags. Explicit flags always win.
-
-## Structured-flag mode
-
-Use this when the user has given you well-separated parameters or you're scripting the call.
+The skill is a Python CLI. The project lives at `/Users/gregorryan/code/openclaw-portfolio-optimiser` with a virtualenv at `.venv`.
 
 ```bash
 cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
   python -m optimiser.cli optimise [flags]
 ```
 
-### Flags
+The CLI prints a single JSON object to stdout. **You must parse this JSON and use its values verbatim.** Do not paraphrase, round, substitute, or extend the values. The `weights`, `tickers`, and `stats` fields are the source of truth for your reply.
 
-- `--from-text "..."` — natural-language request (see above)
-- `--tickers SYM1 SYM2 ...` — universe (default: bundled FTSE 10-name universe)
-- `--objective {max_sharpe,min_variance,max_return}` — what to optimise (default: max_sharpe)
-- `--max-weight FLOAT` — per-name cap, 0 < w <= 1 (default: 1.0, no cap)
-- `--excluded SYM1 SYM2 ...` — tickers to force to zero weight (default: none)
-- `--min-holdings INT` — minimum non-zero positions (default: 1)
-- `--seed INT` — random seed for reproducibility (default: random)
-- `--population INT` — GA population size (default: 100)
-- `--generations INT` — GA generations (default: 200)
+## Natural-language mode (preferred for chat)
 
-### Output Schema
+When the user has stated the request in plain English, pass the entire request via `--from-text`:
 
-Success — stdout, exit 0:
+```bash
+cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
+  python -m optimiser.cli optimise --from-text "max sharpe, exclude banks, cap 25% per name" --seed 42
+```
+
+The response includes a `parsed` block showing what was extracted. If `parsed.confidence` is below 0.5 or `parsed.objective` is null, ask the user to clarify rather than running.
+
+## Flags
+
+- `--from-text "..."` — natural-language request
+- `--tickers SYM1 SYM2 ...` — universe (default: the 30-name FTSE list)
+- `--objective {max_sharpe,min_variance,max_return}`
+- `--max-weight FLOAT` — per-name cap, 0 < w <= 1
+- `--excluded SYM1 SYM2 ...` — tickers to force to zero weight
+- `--min-holdings INT`
+- `--seed INT` — random seed
+- `--population INT` — GA population size (default 100)
+- `--generations INT` — GA generations (default 200)
+
+## Output schema
+
+Success — stdout, exit 0. **These keys are your only source of truth.**
 
 ```json
 {
@@ -101,15 +101,9 @@ Success — stdout, exit 0:
     "n_generations": 200,
     "final_fitness": 0.4697
   },
-  "parsed": {
-    "input": "max sharpe, ...",
-    "confidence": 0.75,
-    "notes": ["..."]
-  }
+  "parsed": { "input": "...", "confidence": 0.75, "notes": ["..."] }
 }
 ```
-
-The `parsed` block only appears when `--from-text` was used.
 
 Failure — stderr, exit non-zero:
 
@@ -117,79 +111,48 @@ Failure — stderr, exit non-zero:
 { "ok": false, "error": "data_error|infeasible_constraints|value_error|unknown", "message": "..." }
 ```
 
-## Example Invocations
+On `ok: false`, report the error to the user honestly. Do not invent a fallback portfolio.
 
-**Plain-English request (preferred):**
+## Reply format
 
-```bash
-cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
-  python -m optimiser.cli optimise \
-    --from-text "max sharpe FTSE portfolio, exclude banks, cap 15% per name" \
-    --seed 42
-```
-
-**Default FTSE universe, max Sharpe, no cap:**
-
-```bash
-cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
-  python -m optimiser.cli optimise --objective max_sharpe --seed 42
-```
-
-**Min-variance, fully diversified (at least 8 holdings, ≤15% each):**
-
-```bash
-cd /Users/gregorryan/code/openclaw-portfolio-optimiser && source .venv/bin/activate && \
-  python -m optimiser.cli optimise \
-    --objective min_variance \
-    --max-weight 0.15 \
-    --min-holdings 8 \
-    --seed 42
-```
-
-## Reply Format
-
-After running the skill, present results to the user as a short Telegram-friendly message. Suggested shape:
+Use the JSON values exactly. Suggested shape:
 
 ```
-📐 Max Sharpe portfolio, FTSE 10-name universe, 5-year window
+Max Sharpe | FTSE 30-name universe | Max 25% per name | Seed 42
 
-Expected return: 13.8%
-Volatility:      21.0%
-Sharpe:          0.47
+Expected return: 11.21%
+Volatility:      17.32%
+Sharpe:          0.42
 
-Weights:
-  AZN.L   40.0%
-  BARC.L  40.0%
-  LLOY.L  20.0%
+Weights (non-zero only):
+  AZN.L   25.00%
+  SHEL.L  25.00%
+  BP.L    25.00%
+  GSK.L   23.93%
+  RIO.L    1.07%
+
+Excluded (per request): LLOY.L, BARC.L, HSBA.L, NWG.L
 
 Notes:
-  • BARC.L and AZN.L hit the 20% cap — the GA wanted more in them.
+  • AZN.L, SHEL.L, and BP.L hit the 25% cap.
   • Past returns do not predict future returns. Illustrative only.
 ```
 
-Always include:
-- a one-line headline with the objective, universe descriptor, and lookback
-- the three stats (return, vol, Sharpe — vol omitted if min_variance was the objective)
-- weights sorted highest to lowest, showing only non-zero positions
-- any *notable* observations (binding caps, excluded names, low diversification) — keep this section to 1-3 bullets max
-- a closing reminder about illustrative / not advice
+## Rules — mechanical, non-negotiable
 
-## Rules
+1. **Never mention a ticker that is not in the JSON `tickers` array.** If you find yourself reaching for a ticker that wasn't returned, stop and rerun the skill with the universe the user intended.
 
-- **Prefer `--from-text` for Telegram messages.** The parser exists so that you don't have to translate phrasing yourself — and the visible `parsed` block in the JSON output is part of the project's transparency story.
-- Always include `--seed` if the user has not specified one, so repeated calls give consistent answers across the conversation. Use a number the user can remember, like 42.
-- Never invent tickers. If unsure whether a name resolves, ask the user to confirm.
-- If the CLI returns `ok: false`:
-  - `data_error`: a ticker probably doesn't resolve on Yahoo. Name the ticker in the error, ask the user to confirm or remove it.
-  - `infeasible_constraints`: report the constraint that broke and propose the smallest relaxation (e.g. "max_weight=0.10 across 5 names can only reach 50% — try 0.20 or add more tickers").
-  - `value_error` / `unknown`: report it plainly and offer to retry with the default config.
-- If `parsed.confidence` is below 0.5, ask the user to clarify rather than running the optimisation blind.
-- Do not run the CLI without a stated `--objective` (or one extracted via `--from-text`). If the user said "best portfolio" with no qualifier, ask whether they want max Sharpe, min variance, or max return.
-- Do not give buy/sell recommendations on individual tickers, even when the weights make one allocation obvious.
-- This is optimisation, not advice. Mention "illustrative only / not investment advice" at the end of meaningful results.
+2. **Never quote a number that is not in the JSON `weights` or `stats`.** No "approximate" stats, no derived figures, no "around 12%". The skill returns the numbers; you transcribe them.
 
-## Notes
+3. **Always include `--seed 42`** if the user has not specified a seed, so the same query gives the same answer next time.
 
-- The CLI takes 5-15 seconds depending on universe size and generations.
-- yfinance occasionally rate-limits or returns empty data for a ticker; this surfaces as `data_error`.
-- The universe order does not matter for the optimisation but the GA's crossover operator loosely preserves contiguous blocks, so ordering tickers by sector can help the search early on.
+4. **If the skill fails (`ok: false`), report the error verbatim**:
+   - `data_error`: name the failing ticker, ask the user to remove or correct it.
+   - `infeasible_constraints`: report the violated constraint and propose the smallest relaxation.
+   - Otherwise: report the message plainly and offer to retry with defaults.
+
+5. **If `parsed.confidence` < 0.5, do not run.** Ask the user to clarify which objective/cap/exclusions they meant.
+
+6. **No buy/sell recommendations on individual tickers**, regardless of how obvious the weights make one allocation.
+
+7. **End every meaningful result with the illustrative-only reminder.**
