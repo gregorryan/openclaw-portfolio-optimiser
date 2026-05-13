@@ -1,0 +1,77 @@
+# Continuous integration for the openclaw-portfolio-optimiser repository.
+#
+# Runs on every push to main and every pull request. Two jobs in parallel:
+# tests (full pytest suite) and security (detect-secrets baseline check).
+# Both must pass for the workflow to succeed.
+#
+# This complements the local pre-commit hooks: pre-commit catches issues
+# before a commit lands, CI catches issues that slipped past pre-commit
+# (e.g. if a contributor didn't run `pre-commit install`).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    name: pytest (Python 3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest
+        run: pytest -v --tb=short
+
+  security:
+    name: detect-secrets baseline check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so detect-secrets sees all blobs, not just HEAD.
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install detect-secrets
+        run: pip install "detect-secrets==1.5.0"
+
+      - name: Verify baseline is up to date
+        # The audit command checks that every secret-looking string in
+        # the repo is accounted for in .secrets.baseline. A new secret
+        # not in the baseline will fail the build.
+        run: |
+          detect-secrets scan --baseline .secrets.baseline
+          # Exit code 0 means no new secrets were detected since the
+          # baseline was generated. Any new findings cause the scan to
+          # update the baseline in-place, so a `git diff` will surface
+          # them. In CI we treat any modification of the baseline as a
+          # failure to force the contributor to audit and commit.
+          if ! git diff --exit-code .secrets.baseline; then
+            echo "::error::detect-secrets found new candidates not in baseline."
+            echo "Run 'detect-secrets scan --baseline .secrets.baseline' locally,"
+            echo "then 'detect-secrets audit .secrets.baseline' to review,"
+            echo "then commit the updated baseline."
+            exit 1
+          fi
