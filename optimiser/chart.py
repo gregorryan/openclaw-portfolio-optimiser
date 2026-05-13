@@ -9,9 +9,10 @@ Design choices:
   narrow screen than vertical bars with rotated labels.
 - Zero-weight tickers are omitted; cluttering the chart with empty bars
   hides the actual allocation.
-- Output to a deterministic path under /tmp so the agent always knows
-  where to find the freshest chart and old runs are auto-cleaned by
-  the OS.
+- Output to ~/.openclaw/media/ — OpenClaw's allowlist of safe media
+  paths includes this directory, so the agent can attach charts to
+  Telegram replies via `openclaw message send --media <path>` without
+  hitting LocalMediaAccessError.
 - Headless backend (`Agg`) so matplotlib doesn't try to open a window
   when the CLI runs non-interactively.
 """
@@ -26,7 +27,7 @@ matplotlib.use("Agg")  # must be set before importing pyplot
 import matplotlib.pyplot as plt
 
 
-CHART_OUTPUT_DIR = "/tmp/sharpe-charts"
+CHART_OUTPUT_DIR = os.path.expanduser("~/.openclaw/media")
 
 
 def _ensure_output_dir() -> str:

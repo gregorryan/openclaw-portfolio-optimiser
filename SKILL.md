@@ -1,19 +1,19 @@
 ---
 name: portfolio-optimise
-description: "Run a genetic algorithm to find optimal portfolio weights given a universe of tickers, an objective (max Sharpe, min variance, max return), and optional constraints (per-name cap, excluded tickers, minimum holdings). Optional train/test backtest mode reports both in-sample and out-of-sample performance."
+description: "Run a genetic algorithm to find optimal portfolio weights given a universe of tickers, an objective (max Sharpe, min variance, max return), and optional constraints (per-name cap, excluded tickers, minimum holdings). Optional train/test backtest mode reports both in-sample and out-of-sample performance. Renders a chart of weights as a PNG and sends it inline to Telegram."
 metadata:
   {
     "openclaw":
       {
         "emoji": "📐",
-        "requires": { "bins": ["python3"] },
+        "requires": { "bins": ["python3", "openclaw"] },
       },
   }
 ---
 
 # Portfolio Optimise Skill
 
-Find optimal portfolio weights using a genetic algorithm against 5 years of daily-close adjusted prices from Yahoo Finance. Optionally, hold out part of that history and report how the weights performed out-of-sample.
+Find optimal portfolio weights using a genetic algorithm against 5 years of daily-close adjusted prices from Yahoo Finance. Optionally, hold out part of that history and report how the weights performed out-of-sample. Always send a chart of the weights inline.
 
 ## Critical: freshness verification
 
@@ -83,6 +83,7 @@ Always include `--seed 42` if the user has not specified a seed.
   "mode": "optimise",
   "run_id": "a3f7c9d1e2b8",
   "timestamp": "2026-05-13T20:15:42+00:00",
+  "chart_path": "/Users/gregorryan/.openclaw/media/weights-a3f7c9d1e2b8.png",
   "objective": "max_sharpe",
   "tickers": ["LLOY.L", "..."],
   "excluded_tickers": ["SHEL.L", "BP.L"],
@@ -105,6 +106,7 @@ Always include `--seed 42` if the user has not specified a seed.
   "mode": "backtest",
   "run_id": "39dc52e90c12",
   "timestamp": "2026-05-13T19:24:34+00:00",
+  "chart_path": "/Users/gregorryan/.openclaw/media/weights-39dc52e90c12.png",
   "objective": "max_sharpe",
   "tickers": ["LLOY.L", "..."],
   "weights": { "BA.L": 0.25, "...": "..." },
@@ -122,6 +124,22 @@ Always include `--seed 42` if the user has not specified a seed.
   }
 }
 ```
+
+## Sending the chart inline (REQUIRED)
+
+After every successful optimise or backtest run, you MUST also send the chart PNG inline to the user's Telegram. The chart file is the path under `chart_path` in the JSON output.
+
+The exact command to run is:
+
+```bash
+openclaw message send --channel telegram --target 8860847516 --message "Portfolio weights chart" --media <chart_path>
+```
+
+Where `<chart_path>` is the value from the JSON. Run this command in the same turn as the optimise/backtest invocation, after you have the path.
+
+**The text reply (with run_id, timestamp, stats, weights, interpretation) is sent as your normal reply. The chart is sent as a separate message via the `openclaw message send` command. Both should arrive in the same turn.**
+
+If the `openclaw message send` command fails, mention this briefly in your text reply so the user knows the chart is missing — do not stay silent about the failure.
 
 ## Reply format — optimise mode
 
@@ -178,6 +196,7 @@ If the gap is negative or small, frame it as the test window happening to be unu
 3. **Never quote a number that is not in the JSON `weights`, `stats`, `train_stats`, or `test_stats`** of the run you just quoted.
 4. **If the user repeats a previous question, re-run the CLI.** Do not paraphrase a previous answer.
 5. **If the user asks "how would this have done?"** or otherwise asks about historical performance, **use `--backtest`** rather than the default mode. The backtest is the honest answer; in-sample stats are not.
-6. **If the skill returns `ok: false`, report the error verbatim** with the new `run_id` and `timestamp`.
-7. **No buy/sell recommendations on individual tickers.**
-8. **Always end with the illustrative-only reminder.**
+6. **After every successful run, send the chart inline via `openclaw message send --media <chart_path>`.** Don't skip this.
+7. **If the skill returns `ok: false`, report the error verbatim** with the new `run_id` and `timestamp`.
+8. **No buy/sell recommendations on individual tickers.**
+9. **Always end with the illustrative-only reminder.**
