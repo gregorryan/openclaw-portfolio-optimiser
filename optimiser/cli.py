@@ -1,17 +1,26 @@
 """Command-line interface to the portfolio optimiser.
 
-Two ways to invoke the optimiser:
+Two modes:
 
-1. Structured flags  — explicit --objective, --max-weight, --excluded, etc.
-2. Natural language  — --from-text "max sharpe, exclude banks, cap 10%"
+1. Optimisation (default)   — fit weights to the full history.
+2. Backtest (--backtest)    — fit weights to the first N% of history,
+                              then evaluate them on the held-out tail.
 
-Output is always JSON on stdout (success, exit 0) or stderr (error,
-exit 1) — no Python stack traces ever reach the caller.
+Two input styles for either mode:
 
-Every successful run includes a `run_id` (fresh UUID) and an ISO-8601
-`timestamp`. These exist so the orchestrating agent has unambiguous
-evidence that the CLI was actually invoked this turn, rather than
-returning a stale answer from chat history.
+- Structured flags  — --objective, --max-weight, --excluded, etc.
+- Natural language  — --from-text "max sharpe, exclude banks, cap 10%"
+
+Output is always JSON: stdout on success (exit 0), stderr on error
+(exit 1). Every successful run includes a fresh `run_id` (UUID) and
+ISO-8601 `timestamp` so the agent layer has evidence the CLI actually
+ran in the current turn — chat-history caching is structurally
+detectable.
+
+Examples:
+    python -m optimiser.cli optimise --objective max_sharpe
+    python -m optimiser.cli optimise --from-text "min variance, no banks"
+    python -m optimiser.cli optimise --from-text "max sharpe, cap 15%" --backtest
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+from optimiser.backtest import backtest
 from optimiser.constraints import Constraints, InfeasibleConstraints
 from optimiser.data import DEFAULT_UNIVERSE_FTSE, DataError, load
 from optimiser.fitness import Objective
@@ -58,17 +68,26 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--seed", type=int, default=None)
     opt.add_argument("--population", type=int, default=100)
     opt.add_argument("--generations", type=int, default=200)
+    opt.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Train/test split: fit on first --train-fraction, evaluate on rest",
+    )
+    opt.add_argument(
+        "--train-fraction",
+        type=float,
+        default=0.80,
+        help="Fraction of history used for fitting in backtest mode (default 0.80)",
+    )
 
     return parser
 
 
 def _run_id() -> str:
-    """Fresh short UUID for this run. Acts as a freshness token."""
     return uuid.uuid4().hex[:12]
 
 
 def _timestamp() -> str:
-    """UTC ISO-8601 timestamp with second precision."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -89,8 +108,7 @@ def _err(message: str, kind: str = "error") -> int:
 
 
 def _merge_with_parsed(
-    args: argparse.Namespace,
-    parsed: StructuredRequest,
+    args: argparse.Namespace, parsed: StructuredRequest
 ) -> argparse.Namespace:
     if args.objective is None and parsed.objective is not None:
         args.objective = parsed.objective.value
@@ -115,6 +133,14 @@ def _apply_defaults(args: argparse.Namespace) -> argparse.Namespace:
     if args.excluded is None:
         args.excluded = []
     return args
+
+
+def _stats_to_dict(stats) -> dict:
+    return {
+        "expected_return_pct": round(stats.expected_return * 100, 2),
+        "volatility_pct": round(stats.volatility * 100, 2),
+        "sharpe": round(stats.sharpe, 3),
+    }
 
 
 def _cmd_optimise(args: argparse.Namespace) -> int:
@@ -145,33 +171,65 @@ def _cmd_optimise(args: argparse.Namespace) -> int:
             n_generations=args.generations,
         )
 
-        result = optimise(
-            price_data.returns,
-            Objective(args.objective),
-            constraints=constraints,
-            config=config,
-        )
+        if args.backtest:
+            bt = backtest(
+                price_data.returns,
+                Objective(args.objective),
+                constraints=constraints,
+                config=config,
+                train_fraction=args.train_fraction,
+            )
+            output: dict = {
+                "ok": True,
+                "mode": "backtest",
+                "run_id": _run_id(),
+                "timestamp": _timestamp(),
+                "objective": args.objective,
+                "tickers": list(bt.tickers),
+                "excluded_tickers": list(args.excluded),
+                "weights": {
+                    t: round(float(w), 4) for t, w in zip(bt.tickers, bt.weights)
+                },
+                "train_stats": _stats_to_dict(bt.train_stats),
+                "test_stats": _stats_to_dict(bt.test_stats),
+                "split": {
+                    "train_fraction": bt.train_fraction,
+                    "train_days": bt.train_days,
+                    "test_days": bt.test_days,
+                },
+                "summary": {
+                    "in_sample_sharpe": round(bt.in_sample_sharpe, 3),
+                    "out_of_sample_sharpe": round(bt.out_of_sample_sharpe, 3),
+                    "sharpe_gap": round(bt.sharpe_gap, 3),
+                },
+            }
+        else:
+            result = optimise(
+                price_data.returns,
+                Objective(args.objective),
+                constraints=constraints,
+                config=config,
+            )
+            output = {
+                "ok": True,
+                "mode": "optimise",
+                "run_id": _run_id(),
+                "timestamp": _timestamp(),
+                "objective": args.objective,
+                "tickers": list(result.tickers),
+                "excluded_tickers": list(args.excluded),
+                "weights": {
+                    t: round(float(w), 4) for t, w in result.as_dict().items()
+                },
+                "stats": _stats_to_dict(result.stats),
+                "summary": {
+                    "n_holdings": int(sum(1 for w in result.weights if w > 1e-6)),
+                    "max_weight": round(float(result.weights.max()), 4),
+                    "n_generations": len(result.fitness_history),
+                    "final_fitness": round(result.fitness, 4),
+                },
+            }
 
-        output: dict = {
-            "ok": True,
-            "run_id": _run_id(),
-            "timestamp": _timestamp(),
-            "objective": args.objective,
-            "tickers": list(result.tickers),
-            "excluded_tickers": list(args.excluded),
-            "weights": {t: round(float(w), 4) for t, w in result.as_dict().items()},
-            "stats": {
-                "expected_return_pct": round(result.stats.expected_return * 100, 2),
-                "volatility_pct": round(result.stats.volatility * 100, 2),
-                "sharpe": round(result.stats.sharpe, 3),
-            },
-            "summary": {
-                "n_holdings": int(sum(1 for w in result.weights if w > 1e-6)),
-                "max_weight": round(float(result.weights.max()), 4),
-                "n_generations": len(result.fitness_history),
-                "final_fitness": round(result.fitness, 4),
-            },
-        }
         if parse_info is not None:
             output["parsed"] = parse_info
 
