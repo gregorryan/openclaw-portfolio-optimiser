@@ -9,13 +9,14 @@ evaluation.
 Repair operations applied, in order:
 1. Zero out weights for excluded tickers
 2. Clip negative weights to zero (long-only enforcement)
-3. Clip weights above max_weight to max_weight
-4. Renormalise so weights sum to 1
-5. (Where step 3 + 4 conflict, we iterate until stable)
+3. Renormalise to sum to 1
+4. Where any weight exceeds max_weight, pin it at the cap and
+   redistribute the excess across the remaining feasible names;
+   iterate until stable.
 
 If the constraints are infeasible (e.g. max_weight too low for the
-universe size), we raise InfeasibleConstraints rather than silently
-producing nonsense.
+universe size, or excluded set too aggressive), we raise
+InfeasibleConstraints rather than silently producing nonsense.
 """
 
 from __future__ import annotations
@@ -113,46 +114,65 @@ def repair(
     # Step 1: zero out excluded tickers
     excluded_set = set(constraints.excluded_tickers)
     excluded_mask = np.array([t in excluded_set for t in tickers], dtype=bool)
+    available_mask = ~excluded_mask
     w[excluded_mask] = 0.0
 
     # Step 2: long-only — clip negatives
     if constraints.long_only:
         w = np.maximum(w, 0.0)
 
-    # Pathological input: all zeros after exclusions. Reset to equal-weight
-    # over the available universe so we don't divide by zero later.
-    if w.sum() <= 0.0:
-        available_mask = ~excluded_mask
+    # Pathological input: all zeros across the available universe.
+    # Fall back to equal-weight over the available names.
+    if w[available_mask].sum() <= 0.0:
         n_available = int(available_mask.sum())
         w = np.where(available_mask, 1.0 / n_available, 0.0)
 
-    # Step 3-4: iterate clip-and-renormalise until weights are stable.
+    # Step 3-4: iterate clip-and-redistribute until weights are stable.
     # A single pass isn't sufficient: clipping a weight down redistributes
     # mass to others, which may push them over the cap. Iterate until
     # no more clipping is needed (typically 2-4 iterations).
-    for _ in range(20):
-        w = w / w.sum()
-        over_cap = w > constraints.max_weight
+    for _ in range(50):
+        # Always start each iteration with weights summing to 1.
+        total = w[available_mask].sum()
+        if total <= 0.0:
+            n_available = int(available_mask.sum())
+            w = np.where(available_mask, 1.0 / n_available, 0.0)
+            continue
+        w[available_mask] = w[available_mask] / total
+        w[excluded_mask] = 0.0
 
+        over_cap = w > constraints.max_weight
         if not over_cap.any():
             break
 
-        # Pin all over-cap weights at max_weight, leave the rest to absorb
-        # whatever's left over after renormalisation on the next pass.
+        # Pin all over-cap weights at max_weight.
         excess_mass = float(w[over_cap].sum() - over_cap.sum() * constraints.max_weight)
         w[over_cap] = constraints.max_weight
 
-        # Distribute the released mass proportionally among the under-cap,
-        # non-excluded names.
-        under_mask = (~over_cap) & (~excluded_mask) & (w > 0.0)
-        if under_mask.any():
-            under_sum = w[under_mask].sum()
-            if under_sum > 0.0:
-                w[under_mask] += excess_mass * (w[under_mask] / under_sum)
+        # Distribute released mass across non-excluded, non-capped names.
+        # Use the *positive* names proportionally if any exist; otherwise
+        # spread equally across all remaining available names so that
+        # zero-valued names that were clipped from negatives can still
+        # absorb mass and reach feasibility.
+        absorbers = (~over_cap) & available_mask
+        if not absorbers.any():
+            # All available names are at the cap — feasibility already
+            # checked, so this means we're done.
+            break
 
-    # Final defensive renormalisation
-    total = w.sum()
+        positive_absorbers = absorbers & (w > 0.0)
+        if positive_absorbers.any() and w[positive_absorbers].sum() > 0.0:
+            share = w[positive_absorbers] / w[positive_absorbers].sum()
+            w[positive_absorbers] += excess_mass * share
+        else:
+            # Spread equally across all available absorbers (incl. zeros).
+            n_absorb = int(absorbers.sum())
+            w[absorbers] += excess_mass / n_absorb
+
+    # Final defensive renormalisation across the available universe.
+    total = w[available_mask].sum()
     if total > 0.0:
-        w = w / total
+        w[available_mask] = w[available_mask] / total
+    w[excluded_mask] = 0.0
 
     return w
