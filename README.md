@@ -1,6 +1,6 @@
 # Sharpe — Natural-language Portfolio Optimisation
 
-An AI agent you can talk to on Telegram to construct optimal portfolios. Tell it what you want — *"FTSE max Sharpe, exclude banks, cap 10% per name, backtest"* — and a genetic algorithm finds weights that satisfy those constraints, then reports how the strategy would have performed out-of-sample.
+An AI agent you can talk to on Telegram to construct optimal portfolios. Tell it what you want — *"FTSE max Sharpe, exclude banks, cap 10% per name, backtest"* — and a genetic algorithm finds weights that satisfy those constraints, then reports how the strategy would have performed out-of-sample. The reply arrives as text plus an inline PNG chart of the weights.
 
 Submission for the [DataVita OpenClaw Challenge 2026](https://jobs.datavita.co.uk/openclaw-challenge).
 
@@ -18,7 +18,7 @@ Sharpe collapses that translation. You describe the portfolio you want in plain 
 - **Parses constraints from plain English** via a deterministic rule-based layer — objectives, caps, sector exclusions, min-holdings — with a confidence score
 - **Runs a genetic algorithm** to maximise one of three objectives: Sharpe, expected return, or negative variance
 - **Backtests with an 80/20 train/test split** so you see in-sample *and* out-of-sample performance, plus the Sharpe gap (the overfitting diagnostic)
-- **Reports results in a Telegram-friendly format** with weights, annualised stats, and an explanation of why the GA landed where it did
+- **Renders a PNG chart** of the weights and delivers it inline alongside the text reply on Telegram
 - **Iterates conversationally** — *"now exclude pharma"*, *"rerun with backtest"*, *"cap 8% instead"*
 
 ## Architecture
@@ -36,24 +36,29 @@ Sharpe collapses that translation. You describe the portfolio you want in plain 
                            │ exec
                     ┌──────▼────────┐
                     │ portfolio-    │  ← SKILL.md teaches Sharpe
-                    │ optimise      │     when/how to call the CLI
+                    │ optimise      │     when/how to call the wrapper
                     │ (skill)       │
+                    └──────┬────────┘
+                           │ scripts/sharpe-optimise.sh
+                    ┌──────▼────────┐
+                    │  Wrapper      │  ← runs CLI, parses JSON,
+                    │  (bash)       │     sends chart inline
                     └──────┬────────┘
                            │ python -m optimiser.cli
                     ┌──────▼────────┐
-                    │  CLI (JSON    │  ← argparse wrapper, returns
-                    │   in/out)     │     structured output + run_id
+                    │  CLI (JSON    │  ← argparse, returns structured
+                    │   in/out)     │     output + run_id + chart_path
                     └──────┬────────┘
                            │
-       ┌──────────┬────────┼──────────┬──────────┐
-       ▼          ▼        ▼          ▼          ▼
-   ┌───────┐  ┌───────┐ ┌───────┐ ┌───────┐ ┌────────┐
-   │ data  │  │parser │ │fitness│ │  ga   │ │backtest│
-   │ (yf)  │  │(regex)│ │ (np)  │ │(numpy)│ │(split) │
-   └───────┘  └───────┘ └───────┘ └───────┘ └────────┘
+   ┌──────────┬──────┬─────┴───┬──────────┬──────────┐
+   ▼          ▼      ▼         ▼          ▼          ▼
+┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐ ┌─────────┐
+│ data │ │parser│ │fitnss│ │  ga  │ │backtest│ │  chart  │
+│ (yf) │ │(regx)│ │ (np) │ │(numpy│ │ (split)│ │ (mpl)   │
+└──────┘ └──────┘ └──────┘ └──────┘ └────────┘ └─────────┘
 ```
 
-Six production modules:
+Seven production modules:
 
 - **`optimiser/data.py`** — yfinance wrapper, log-returns, 30-name FTSE universe + sector groupings
 - **`optimiser/parser.py`** — deterministic NLP layer: objectives, caps, sector-aware exclusions, min-holdings, confidence score
@@ -61,11 +66,13 @@ Six production modules:
 - **`optimiser/constraints.py`** — feasibility checks + iterative clip-and-renormalise repair operator
 - **`optimiser/ga.py`** — tournament selection, single-point crossover, gaussian mutation, elitism
 - **`optimiser/backtest.py`** — train/test split with in-sample / out-of-sample stats and the Sharpe gap diagnostic
+- **`optimiser/chart.py`** — matplotlib bar chart of weights, written to an OpenClaw-allowlisted media path
 
 Plus the agent layer:
 
 - **`SOUL.md`** — Sharpe's identity, scope, and tone (anti-chatbot-ese, anti-investment-advice, finance-literate)
-- **`SKILL.md`** — runbook teaching the agent when to call the CLI, how to format results, and the rules that prevent hallucination
+- **`SKILL.md`** — runbook teaching the agent when to call the wrapper, how to format results, and the rules that prevent hallucination
+- **`scripts/sharpe-optimise.sh`** — atomic wrapper: runs the CLI, parses `chart_path` from JSON, sends the chart inline to Telegram, with a 60-second throttle to deduplicate within-turn re-invocations
 
 ## Results
 
@@ -92,7 +99,7 @@ The strategy concentrated in BA.L (defence), IMB.L (tobacco), RR.L (defence), TS
 
 ## Try it
 
-The bot lives at `@gregor_portfolio_bot` on Telegram. DM access is allowlisted to the operator (judges: contact the operator to request access).
+The bot lives at `@gregor_portfolio_bot` on Telegram. DM access is restricted to an allowlist of Telegram user IDs (operator + named judges); the bot will not respond to anyone outside that list. To request access for evaluation, contact the operator via the email on the GitHub profile.
 
 Example prompts that work:
 
@@ -129,6 +136,10 @@ A single fit, no rebalancing, no transaction costs, on a universe that wasn't cu
 
 Early in development the agent would sometimes describe results without actually running the skill — Sonnet would pull a plausible-looking answer from chat history rather than re-invoke the CLI. The fix: every CLI invocation now emits a fresh UUID and ISO-8601 timestamp, and SKILL.md requires the agent to quote both in every reply. **Hallucination is now mechanically detectable** — if the run_id isn't a fresh UUID minted in the current turn, the agent didn't run the skill. This is a small but genuine engineering response to a known LLM failure mode.
 
+### Why a wrapper script for chart delivery
+
+Sonnet reliably ran the optimiser when prompted by SKILL.md, but inconsistently chained the follow-up `openclaw message send --media` call needed to attach the chart inline. Wrapping both calls into a single bash script removes that decision from the agent. The wrapper runs the Python CLI, parses `chart_path` from the JSON, and delivers the chart as a side effect — with a 60-second throttle to deduplicate within-turn re-invocations. Same pattern as the run_id fix: replace "trust the agent" with mechanical guarantees at the side-effect layer.
+
 ### Why local-first deployment
 
 OpenClaw's design intent is a personal AI assistant on your own devices. This submission runs on the operator's machine as a LaunchAgent, surviving sleep/wake cycles, reachable from anywhere via Telegram's outbound polling model. The deployment story is deliberately aligned with OpenClaw's vision rather than retrofitted into a generic cloud-hosted-bot pattern.
@@ -137,13 +148,33 @@ OpenClaw's design intent is a personal AI assistant on your own devices. This su
 
 Sharpe refuses buy/sell recommendations on individual securities and frames all outputs as illustrative. This is non-negotiable for any consumer-facing financial tool. The agent is configured (via SOUL.md) to redirect such requests toward defining an objective and constraints.
 
+## Security
+
+A finance-adjacent tool exposed via Telegram has a real security surface. The project takes the following measures:
+
+**Gateway**: bound to loopback (`127.0.0.1`) only, never `0.0.0.0`. No inbound traffic from the network can reach the OpenClaw gateway directly; Telegram polls outbound. The `controlUi.allowInsecureAuth` flag is disabled, so even local dashboard access requires a token.
+
+**Telegram channel**: DM access is restricted by `channels.telegram.allowFrom`, an explicit allowlist of Telegram user IDs. Group access requires the bot to be `@`-mentioned. Anyone else messaging the bot directly is ignored.
+
+**No buy/sell recommendations on individual securities.** Sharpe is configured at the SOUL.md layer to refuse this and redirect to constraint definition. Every reply ends with an illustrative-only disclaimer. The optimiser does not connect to any broker, exchange, or order-execution system.
+
+**LLM output verification**: each CLI invocation emits a fresh UUID (`run_id`) and ISO-8601 timestamp. SKILL.md requires the agent to quote both in every reply. If a reply lacks a fresh `run_id`, the agent didn't actually run the optimiser — it cached a previous result. This makes a class of LLM hallucination *mechanically* detectable rather than relying on trust.
+
+**Tokens** are stored in `~/.openclaw/openclaw.json` (permissions 600) and `~/.openclaw/devices/paired.json`. All tokens were rotated as part of preparing this submission. No tokens are committed to the repository.
+
+**Input bounds**: the natural-language parser only extracts known constructs (objectives, caps, ticker symbols matching `^[A-Z]+(\.L)?$`, sector names from a fixed list). Free-form input outside this grammar is ignored rather than passed through to downstream layers.
+
+**No write access to external systems**: the optimiser reads market data (Yahoo Finance, public) and writes only to its own workspace and a designated media directory. It does not write to email, calendars, files outside the project, or any third-party service.
+
+**Known limitations**: the agent runs on the operator's local machine. If the laptop is compromised at the OS level, the gateway is too. This is by design — OpenClaw's philosophy is local-first ownership — but it's not appropriate for multi-tenant cloud deployment without additional hardening (per-user isolation, secret-store integration, audit logging).
+
 ## Engineering
 
 - **113 tests**, all passing, sub-2-second runtime, network calls mocked
 - **Conventional Commits** throughout — `feat(ga):`, `fix(persona):`, `test(backtest):` — for legible history
 - **Type hints, dataclasses, docstrings** across every module
 - **JSON I/O at the CLI boundary** so the agent never has to parse Python tracebacks
-- **Float-safety**: explicit guards against numpy edge cases (a known bug Caught and Fixed during testing — see `fix(fitness)` and `fix(constraints)` commits)
+- **Float-safety**: explicit guards against numpy edge cases (a known bug caught and fixed during testing — see `fix(fitness)` and `fix(constraints)` commits)
 
 ```bash
 git clone https://github.com/gregorryan/openclaw-portfolio-optimiser.git
@@ -171,15 +202,15 @@ python -m optimiser.cli optimise \
 - **Transaction costs** in the backtest — slippage, commission, bid-ask spread.
 - **Survivorship-bias correction** — historical FTSE constituents over time, not just the current 30.
 - **Efficient-frontier sweep** — plot return vs. vol across multiple risk targets.
-- **Chart image attachment** — send a matplotlib bar chart of the weights inline with the Telegram reply.
 - **Cloud deployment** with secrets via a managed secret store, for operators who'd rather not host locally.
+- **Pre-commit secret-scanning** (`detect-secrets` or `gitleaks`) to harden against accidental token commits.
 
 ## Stack
 
 - [OpenClaw](https://openclaw.ai) (gateway, skills, persona)
 - Anthropic Claude Sonnet 4.6 (language reasoning via Claude Code subscription auth)
 - Telegram Bot API (channel)
-- Python 3.13 — numpy, pandas, yfinance, pytest
+- Python 3.13 — numpy, pandas, yfinance, matplotlib, pytest
 
 ## Acknowledgements
 
