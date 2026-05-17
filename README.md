@@ -14,6 +14,10 @@ The natural-language barrier matters. A trader who can articulate *"I want max S
 
 Sharpe collapses that translation. You describe the portfolio you want in plain English; a genetic algorithm finds it; the agent explains what it did, shows the out-of-sample numbers, and tells you honestly whether the result generalised.
 
+## A note on AI-assisted development
+
+Built with AI tooling for code review, documentation drafting, and pair-programming style debugging - same as any modern developer. All architectural decisions, problem formulation, and final code review are mine.
+
 ## What it does
 
 - **Pulls 5 years of daily-close prices** from Yahoo Finance for any universe of tickers
