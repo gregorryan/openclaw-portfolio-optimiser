@@ -32,7 +32,7 @@ Sharpe collapses that translation. You describe the portfolio you want in plain 
                     └──────┬───────┘
                            │ Bot API
                     ┌──────▼────────┐
-                    │   OpenClaw    │  ← Agent gateway (LaunchAgent)
+                    │   OpenClaw    │  ← Agent gateway (systemd user service)
                     │    Gateway    │  ← persona = Sharpe (SOUL.md)
                     └──────┬────────┘
                            │ exec
@@ -63,7 +63,7 @@ Sharpe collapses that translation. You describe the portfolio you want in plain 
 Seven production modules:
 
 - **`optimiser/data.py`** — yfinance wrapper, log-returns, 30-name FTSE universe + sector groupings
-- **`optimiser/parser.py`** — deterministic NLP layer: objectives, caps, sector-aware exclusions, min-holdings, confidence score
+- **`optimiser/parser.py`** — deterministic NLP layer: objectives, caps, sector-aware exclusions, min-holdings, confidence score, and a defended trust boundary (length cap, control-character rejection, prompt-injection flagging)
 - **`optimiser/fitness.py`** — annualised mean/vol/Sharpe, three objectives, UK-gilt-anchored risk-free rate (~4%)
 - **`optimiser/constraints.py`** — feasibility checks + iterative clip-and-renormalise repair operator
 - **`optimiser/ga.py`** — tournament selection, single-point crossover, gaussian mutation, elitism
@@ -101,7 +101,7 @@ The strategy concentrated in BA.L (defence), IMB.L (tobacco), RR.L (defence), TS
 
 ## Try it
 
-The bot lives at `@gregor_portfolio_bot` on Telegram. DM access is restricted to an allowlist of Telegram user IDs (operator + named judges); the bot will not respond to anyone outside that list. To request access for evaluation, contact the operator via the email on the GitHub profile.
+The bot lives at `@gregor_portfolio_bot` on Telegram. To request access for evaluation, send the operator your numeric Telegram user ID via the email on the GitHub profile. You'll be added to the allowlist and can then DM the bot directly.
 
 Example prompts that work:
 
@@ -115,6 +115,14 @@ Backtest a max-Sharpe FTSE portfolio with 20% cap and exclude banks.
 
 Now also exclude energy and rerun.
 ```
+
+## Hosting & access
+
+The bot runs on an **always-free Oracle Cloud ARM instance** (Ubuntu 22.04, 1 OCPU, 6 GB RAM, UK South region), managed as a systemd user service that auto-restarts on crash and survives reboots. Telegram polling is outbound from the server, so no inbound ports are exposed to the public internet — the entire reachable surface is the Telegram Bot API mediated by the allowlist.
+
+The local-loopback gateway model from OpenClaw is preserved on the server: the gateway binds to `127.0.0.1`, only the Telegram channel reaches outbound. This is OpenClaw's local-first philosophy applied to a small cloud VM rather than retrofitted into a generic cloud-hosted-bot pattern. From a security and architecture standpoint the bot is "one operator's machine"; the operator just happens to be a 24/7 cloud VM rather than a laptop.
+
+The Anthropic backend uses Claude Code's CLI bridge (`agentRuntime.id: "claude-cli"`) which delegates inference to a long-lived OAuth subscription. This keeps deployment cost predictable (Claude Max subscription, no per-token API spend) and aligns with Anthropic's recommended path for headless OpenClaw operation.
 
 ## Design rationale
 
@@ -140,11 +148,11 @@ Early in development the agent would sometimes describe results without actually
 
 ### Why a wrapper script for chart delivery
 
-Sonnet reliably ran the optimiser when prompted by SKILL.md, but inconsistently chained the follow-up `openclaw message send --media` call needed to attach the chart inline. Wrapping both calls into a single bash script removes that decision from the agent. The wrapper runs the Python CLI, parses `chart_path` from the JSON, and delivers the chart as a side effect — with a 60-second throttle to deduplicate within-turn re-invocations. Same pattern as the run_id fix: replace "trust the agent" with mechanical guarantees at the side-effect layer.
+The agent (Sonnet, then Opus) reliably ran the optimiser when prompted by SKILL.md, but inconsistently chained the follow-up `openclaw message send --media` call needed to attach the chart inline. Wrapping both calls into a single bash script removes that decision from the agent. The wrapper runs the Python CLI, parses `chart_path` from the JSON, and delivers the chart as a side effect — with a 60-second throttle to deduplicate within-turn re-invocations. Same pattern as the run_id fix: replace "trust the agent" with mechanical guarantees at the side-effect layer.
 
-### Why local-first deployment
+### Why local-first-as-cloud-VM deployment
 
-OpenClaw's design intent is a personal AI assistant on your own devices. This submission runs on the operator's machine as a LaunchAgent, surviving sleep/wake cycles, reachable from anywhere via Telegram's outbound polling model. The deployment story is deliberately aligned with OpenClaw's vision rather than retrofitted into a generic cloud-hosted-bot pattern.
+OpenClaw's design intent is a personal AI assistant on your own devices, with a loopback-only gateway and the operator as the single trust boundary. This submission honours that model literally — the gateway binds to `127.0.0.1`, all reachable surface is mediated by the Telegram allowlist — but runs the "device" on an always-free Oracle Cloud ARM VM so the bot is internet-reachable 24/7 without depending on the operator's laptop. The deployment is the OpenClaw model, not a generic cloud-bot retrofit; the only thing different from a laptop deployment is that the device never sleeps.
 
 ### Compliance posture
 
@@ -162,21 +170,24 @@ A finance-adjacent tool exposed via Telegram has a real security surface. The pr
 
 **LLM output verification**: each CLI invocation emits a fresh UUID (`run_id`) and ISO-8601 timestamp. SKILL.md requires the agent to quote both in every reply. If a reply lacks a fresh `run_id`, the agent didn't actually run the optimiser — it cached a previous result. This makes a class of LLM hallucination *mechanically* detectable rather than relying on trust.
 
-**Tokens** are stored in `~/.openclaw/openclaw.json` (permissions 600) and `~/.openclaw/devices/paired.json`. All tokens were rotated as part of preparing this submission. No tokens are committed to the repository.
+**Parser input bounds**: the natural-language parser caps inputs at 500 characters, rejects control characters, and flags common prompt-injection patterns (lowering confidence and emitting a note for the agent to handle). 16 dedicated tests in `tests/test_parser_validation.py` cover the trust-boundary behaviour. Not a guarantee against motivated attackers — raises the bar.
 
-**Input bounds**: the natural-language parser only extracts known constructs (objectives, caps, ticker symbols matching `^[A-Z]+(\.L)?$`, sector names from a fixed list). Free-form input outside this grammar is ignored rather than passed through to downstream layers.
+**Tokens** are stored in `~/.openclaw/openclaw.json` (permissions 600) and `~/.openclaw/devices/paired.json`. All tokens were rotated as part of preparing this submission. No tokens are committed to the repository. Pre-commit (`detect-secrets`) and CI (`detect-secrets-hook` baseline check) both run on every commit and every push.
 
 **No write access to external systems**: the optimiser reads market data (Yahoo Finance, public) and writes only to its own workspace and a designated media directory. It does not write to email, calendars, files outside the project, or any third-party service.
 
-**Known limitations**: the agent runs on the operator's local machine. If the laptop is compromised at the OS level, the gateway is too. This is by design — OpenClaw's philosophy is local-first ownership — but it's not appropriate for multi-tenant cloud deployment without additional hardening (per-user isolation, secret-store integration, audit logging).
+**Known limitations**: the agent runs on a single VM with a single operator trust boundary — same model as a laptop deployment, just on a cloud instance. If the VM is compromised at the OS level, the gateway is too. This is by design and aligned with OpenClaw's philosophy, but is not appropriate for multi-tenant cloud deployment without additional hardening (per-user isolation, secret-store integration, audit logging).
+
+See [SECURITY.md](SECURITY.md) for the full threat model, mitigations table, and token rotation runbook.
 
 ## Engineering
 
-- **113 tests**, all passing, sub-2-second runtime, network calls mocked
+- **129 tests**, all passing, sub-2-second runtime, network calls mocked
 - **Conventional Commits** throughout — `feat(ga):`, `fix(persona):`, `test(backtest):` — for legible history
 - **Type hints, dataclasses, docstrings** across every module
 - **JSON I/O at the CLI boundary** so the agent never has to parse Python tracebacks
 - **Float-safety**: explicit guards against numpy edge cases (a known bug caught and fixed during testing — see `fix(fitness)` and `fix(constraints)` commits)
+- **CI on every push**: pytest (Python 3.13 on Ubuntu) and `detect-secrets-hook` baseline check, both must pass before merge
 
 ```bash
 git clone https://github.com/gregorryan/openclaw-portfolio-optimiser.git
@@ -204,15 +215,16 @@ python -m optimiser.cli optimise \
 - **Transaction costs** in the backtest — slippage, commission, bid-ask spread.
 - **Survivorship-bias correction** — historical FTSE constituents over time, not just the current 30.
 - **Efficient-frontier sweep** — plot return vs. vol across multiple risk targets.
-- **Cloud deployment** with secrets via a managed secret store, for operators who'd rather not host locally.
-- **Pre-commit secret-scanning** (`detect-secrets` or `gitleaks`) to harden against accidental token commits.
+- **Per-user rate limiting** — currently blocked by OpenClaw issue #29474 (Telegram sender ID not exposed to skill exec environment for text/photo messages). Access control falls back to the channel allowlist.
+- **Multi-tenant deployment** with per-user isolation, secret-store integration, and audit logging — out of scope for a one-operator submission.
 
 ## Stack
 
 - [OpenClaw](https://openclaw.ai) (gateway, skills, persona)
-- Anthropic Claude Sonnet 4.6 (language reasoning via Claude Code subscription auth)
+- Anthropic Claude Opus 4.7 (language reasoning via Claude Code subscription auth, CLI bridge)
 - Telegram Bot API (channel)
 - Python 3.13 — numpy, pandas, yfinance, matplotlib, pytest
+- Oracle Cloud Free Tier ARM (host) — Ubuntu 22.04, systemd user service
 
 ## Acknowledgements
 
